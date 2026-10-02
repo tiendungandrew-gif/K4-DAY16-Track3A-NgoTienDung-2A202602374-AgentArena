@@ -79,16 +79,73 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not isinstance(report, dict):
+            return report
+
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        observed = getattr(ctx, "observed_text", "")
+        corpus = getattr(ctx, "corpus", None) or getattr(getattr(ctx, "tools", None), "corpus", None)
+        docs = getattr(corpus, "docs", []) if corpus else []
+
+        valid_claims = []
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+
+            if text in observed:
+                valid_claims.append(claim)
+                continue
+
+            # 3. Thử tách câu ghép nối bằng " và " (mâu thuẫn nguồn)
+            split_success = False
+            sep = " và "
+            if sep in text:
+                start = 0
+                while True:
+                    idx = text.find(sep, start)
+                    if idx == -1:
+                        break
+                    left = text[:idx]
+                    right = text[idx + len(sep):]
+                    if left in observed and right in observed:
+                        doc_left = None
+                        doc_right = None
+                        for d in docs:
+                            if left in d.body and doc_left is None:
+                                doc_left = d.doc_id
+                            if right in d.body and doc_right is None:
+                                doc_right = d.doc_id
+                        if doc_left and doc_right and doc_left != doc_right:
+                            valid_claims.append({"text": left, "doc_id": doc_left})
+                            valid_claims.append({"text": right, "doc_id": doc_right})
+                            report["abstain"] = True
+                            split_success = True
+                            break
+                    start = idx + len(sep)
+
+            # 4. Không tách được -> đây là câu bịa, bỏ claim
+
+        # 5. Nếu không còn claim nào: abstain = True, viết lại answer
+        if not valid_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ để trả lời."
+            return report
+
+        # 6. Cập nhật report["citations"] cho khớp với claims còn lại
+        report["claims"] = valid_claims
+        doc_ids = set()
+        for c in valid_claims:
+            did = c.get("doc_id")
+            if did:
+                doc_ids.add(did)
+        report["citations"] = sorted(doc_ids)
+
+        return report
