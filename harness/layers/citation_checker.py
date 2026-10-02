@@ -68,16 +68,53 @@ class CitationChecker(Middleware):
     name = "citation_checker"
 
     def after_agent(self, ctx, report):
-        # TODO (§11): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; bỏ qua nếu rỗng hoặc ctx.corpus là None.
-        #  2. Với mỗi claim, gọi ctx.corpus.get(claim["doc_id"]).
-        #     Nếu tài liệu tồn tại VÀ claim["text"] khớp NGUYÊN VĂN một
-        #     DÒNG trong body của nó (không phải chỉ "nằm trong body")
-        #     -> trích dẫn đã đúng, giữ nguyên claim.
-        #  3. Nếu không: tìm trong ctx.corpus.docs tài liệu đầu tiên thoả
-        #     doc.body in ctx.observed_text  và  claim["text"] khớp
-        #     nguyên văn một DÒNG của doc.body -> đó là nguồn thật.
-        #     Đổi doc_id sang nó, GIỮ NGUYÊN text.
-        #  4. Không tìm được nguồn nào -> để `critic` xử lý, đừng bịa doc_id.
-        #  5. Cập nhật report["citations"] = danh sách doc_id đã sắp xếp.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not isinstance(report, dict):
+            return report
+
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        corpus = getattr(ctx, "corpus", None) or getattr(getattr(ctx, "tools", None), "corpus", None)
+        if corpus is None:
+            return report
+
+        observed = getattr(ctx, "observed_text", "")
+
+        def matches_line(text: str, doc) -> bool:
+            if not doc or not getattr(doc, "body", None):
+                return False
+            return any(text in line for line in doc.body.splitlines())
+
+        docs = getattr(corpus, "docs", [])
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+
+            current_doc_id = claim.get("doc_id")
+            current_doc = corpus.get(current_doc_id) if current_doc_id else None
+
+            # 2. Nếu tài liệu hiện tại tồn tại VÀ text khớp NGUYÊN VĂN 1 dòng trong body của nó
+            if current_doc and matches_line(text, current_doc):
+                continue
+
+            # 3. Nếu không: tìm trong corpus.docs tài liệu đầu tiên thoả doc.body in observed và text khớp 1 dòng
+            for doc in docs:
+                if doc.body in observed and matches_line(text, doc):
+                    claim["doc_id"] = doc.doc_id
+                    break
+
+        # 5. Cập nhật report["citations"] = danh sách doc_id đã sắp xếp
+        doc_ids = set()
+        for c in claims:
+            if isinstance(c, dict):
+                did = c.get("doc_id")
+                if did:
+                    doc_ids.add(did)
+        report["citations"] = sorted(doc_ids)
+
+        return report
